@@ -222,7 +222,7 @@ function ChartLegendContent({
         const itemConfig = getPayloadConfigFromPayload(config, item, key)
 
         return (
-          <div key={item.value} className="flex items-center gap-1.5">
+        <div key={String(item.value)} className="flex items-center gap-1.5">
             {itemConfig?.icon && !hideIcon ? (
               <itemConfig.icon />
             ) : (
