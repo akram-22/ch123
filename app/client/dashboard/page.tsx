@@ -1,736 +1,272 @@
+
 'use client'
 
-/**
- * PAGE: Client Platform Dashboard (Legacy / Auth-Protected)
- * ROUTE: /client/dashboard
- * PURPOSE: Older authenticated dashboard — machine fleet overview, alerts, sensor readings.
- *          Superseded by /dashboard for new unified platform experience.
- */
-
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
-  LogOut, Building2, Cpu, AlertTriangle, Activity, RefreshCw,
-  ChevronRight, Thermometer, Zap, Gauge, BarChart2, FileText,
-  User, Shield, Bell, ArrowRight, TrendingDown, CheckCircle2,
-  Radio, Wifi, Download, Clock,
+  LogOut, Building2, AlertTriangle,
+  Play, Activity, CheckCircle2, ArrowRight,
+  Brain, Bell, Cpu, ChevronRight, X, Wrench,
+  TrendingUp, LayoutDashboard, LineChart, BarChart3, Rss,
 } from 'lucide-react'
-import {
-  useAuth,
-  getPlanLabel, getPlanColor,
-  getSeverityColor, getStatusColor, getStatusBg,
-  formatLastSync,
-  type ClientMachine, type ClientAlert,
-} from '@/lib/auth'
+import { useAuth } from '@/lib/auth'
+import MainteligenceDashboard from '@/components/mainteligence-dashboard'
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HELPERS
-// ─────────────────────────────────────────────────────────────────────────────
+type GuidedTab = 'overview' | 'asset' | 'rul' | 'models' | 'insights' | 'sensor' | 'alerts' | 'maintenance'
 
-type ClientSection = 'overview' | 'machines' | 'monitoring' | 'ai' | 'reports' | 'account'
-
-function cn(...classes: (string | boolean | undefined)[]) {
-  return classes.filter(Boolean).join(' ')
+const TAB_MAP: Record<GuidedTab, string> = {
+  overview: 'overview', sensor: 'sensors', rul: 'analytics',
+  models: 'models', alerts: 'alerts', asset: 'assets',
+  insights: 'insights', maintenance: 'maintenance',
 }
 
-function getRulColor(rul: number) {
-  if (rul <= 20) return '#ef4444'
-  if (rul <= 45) return '#f59e0b'
-  return '#10b981'
-}
+const GUIDED_STEPS = [
+  {
+    step: 1, title: "Vue d'ensemble du système",
+    subtitle: '5 machines en ligne — 3 anomalies actives dans le parc',
+    icon: LayoutDashboard, color: '#3b82f6', tab: 'overview' as GuidedTab, target: 'overview-kpis',
+    instruction: "La vue d'ensemble affiche l'intégralité du parc en un coup d'œil — santé de la flotte, alertes actives, RUL moyen et statut des dispositifs.",
+  },
+  {
+    step: 2, title: 'Flux capteurs — Télémétrie en direct',
+    subtitle: 'MS-02 (Compresseur K-12) — vibration et température anormales',
+    icon: Rss, color: '#f59e0b', tab: 'sensor' as GuidedTab, target: 'machine-cards',
+    instruction: 'Le flux capteurs transmet en temps réel les lectures de tous vos dispositifs Mainteligence Sense.',
+  },
+  {
+    step: 3, title: 'Analyse RUL — Prévision de défaillance',
+    subtitle: 'Moteur EMT-22 prédit en défaillance dans 11 jours',
+    icon: LineChart, color: '#ef4444', tab: 'rul' as GuidedTab, target: 'rul-chart',
+    instruction: "L'analyse RUL affiche la trajectoire de dégradation et la durée de vie résiduelle prévue de chaque machine.",
+  },
+  {
+    step: 4, title: 'Comparaison des modèles — LSTM vs RF vs GB',
+    subtitle: 'Les 4 modèles confirment le statut critique — RUL < 15 jours',
+    icon: BarChart3, color: '#a78bfa', tab: 'models' as GuidedTab, target: 'model-comparison',
+    instruction: 'La comparaison des modèles exécute LSTM, GRU, Random Forest et Gradient Boosting en parallèle pour la meilleure précision.',
+  },
+  {
+    step: 5, title: 'Alertes — Impact financier',
+    subtitle: 'Évitez 1 200 000 DZD de pertes — planifiez la maintenance maintenant',
+    icon: Bell, color: '#10b981', tab: 'alerts' as GuidedTab, target: 'alerts-panel',
+    instruction: 'Chaque événement critique est capturé ici avec son impact financier estimé.',
+  },
+] as const
 
-function getRulBg(rul: number) {
-  if (rul <= 20) return 'rgba(239,68,68,0.08)'
-  if (rul <= 45) return 'rgba(245,158,11,0.08)'
-  return 'rgba(16,185,129,0.08)'
-}
+type StepConfig = typeof GUIDED_STEPS[number]
 
-function RulBar({ value, max = 120 }: { value: number, max?: number }) {
-  const pct = Math.min(100, (value / max) * 100)
-  const color = getRulColor(value)
-  return (
-    <div className="w-full h-1.5 bg-[#1c1c1f] rounded-full overflow-hidden">
-      <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, backgroundColor: color }} />
-    </div>
-  )
-}
-
-function HealthBar({ value }: { value: number }) {
-  const color = value >= 80 ? '#10b981' : value >= 55 ? '#f59e0b' : '#ef4444'
-  return (
-    <div className="w-full h-1.5 bg-[#1c1c1f] rounded-full overflow-hidden">
-      <div className="h-full rounded-full transition-all duration-500" style={{ width: `${value}%`, backgroundColor: color }} />
-    </div>
-  )
-}
-
-// mini real-time sparkline
-function MiniSparkline({ data, color }: { data: number[], color: string }) {
-  if (data.length < 2) return <div className="h-8 bg-[#111113] rounded-sm animate-pulse" />
-  const W = 120, H = 32
-  const min = Math.min(...data) - 2
-  const max = Math.max(...data) + 2
-  const pts = data.map((v, i) => [
-    (i / (data.length - 1)) * W,
-    H - 4 - ((v - min) / (max - min || 1)) * (H - 8),
-  ])
-  const line = pts.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`).join(' ')
-  const area = `M0,${H} ` + pts.map(([x, y]) => `L${x.toFixed(1)},${y.toFixed(1)}`).join(' ') + ` L${W},${H} Z`
-  return (
-    <svg width="100%" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ height: 32 }}>
-      <defs>
-        <linearGradient id={`sg-${color.replace('#','')}`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity="0.3" />
-          <stop offset="100%" stopColor={color} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <path d={area} fill={`url(#sg-${color.replace('#','')})`} />
-      <path d={line} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
-// AI model predictions based on sensor state
-function deriveAI(m: ClientMachine) {
-  const base = m.rul
-  const noise = (s: number) => Math.max(0, base + Math.sin(base * s) * 4 - (m.vibration > 1.5 ? 6 : 0))
-  const lstm  = parseFloat(noise(0.17).toFixed(1))
-  const gru   = parseFloat(noise(0.13).toFixed(1))
-  const rf    = parseFloat((noise(0.21) - 3).toFixed(1))
-  const gb    = parseFloat((noise(0.09) + 1.5).toFixed(1))
-  const ensemble = parseFloat((lstm * 0.35 + gru * 0.30 + rf * 0.20 + gb * 0.15).toFixed(1))
-  const status = ensemble < 20 ? 'critical' : ensemble < 50 ? 'warning' : 'normal'
-  return { lstm, gru, rf, gb, ensemble, status }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SIDEBAR
-// ─────────────────────────────────────────────────────────────────────────────
-
-type NavItem = { id: ClientSection, label: string, IconComp: React.ElementType }
-const NAV_ITEMS: NavItem[] = [
-  { id: 'overview',   label: "Vue d'ensemble",    IconComp: BarChart2 },
-  { id: 'machines',   label: 'Machines',          IconComp: Cpu },
-  { id: 'monitoring', label: 'Surveillance live', IconComp: Activity },
-  { id: 'ai',         label: 'Insights IA',       IconComp: Zap },
-  { id: 'reports',    label: 'Rapports',          IconComp: FileText },
-  { id: 'account',    label: 'Compte',            IconComp: User },
-]
-
-// ─────────────────────────────────────────────────────────────────────────────
-// OVERVIEW SECTION
-// ─────────────────────────────────────────────────────────────────────────────
-
-function OverviewSection({ machines, alerts, avgHealth, lastSync, planExpiry, plan }: {
-  machines: ClientMachine[]
-  alerts: ClientAlert[]
-  avgHealth: number
-  lastSync: string
-  planExpiry: string
-  plan: string
+function GuidedOverlay({ onClose, onSetSection }: {
+  onClose: () => void
+  onSetSection: (tab: GuidedTab) => void
 }) {
-  const critical = alerts.filter(a => a.severity === 'critical' && !a.resolved).length
-  const warning  = alerts.filter(a => a.severity === 'warning'  && !a.resolved).length
+  const [step, setStep] = useState(0)
+  const current: StepConfig = GUIDED_STEPS[step]
+  const Icon = current.icon
+  const isLast = step === GUIDED_STEPS.length - 1
 
-  const kpis = [
-    { label: 'Machines connectées', value: machines.length, sub: 'capteurs actifs', icon: <Cpu size={13} />, color: '#3b82f6' },
-    { label: 'Alertes actives', value: alerts.filter(a => !a.resolved).length,
-      sub: `${critical} critique · ${warning} avertissement`, icon: <Bell size={13} />,
-      color: critical > 0 ? '#ef4444' : warning > 0 ? '#f59e0b' : '#10b981' },
-    { label: 'Santé moyenne du parc', value: `${avgHealth}%`, sub: 'moyenne flotte',
-      icon: <Activity size={13} />, color: avgHealth >= 80 ? '#10b981' : avgHealth >= 60 ? '#f59e0b' : '#ef4444' },
-    { label: 'Dernière sync', value: formatLastSync(lastSync), sub: 'données capteurs', icon: <RefreshCw size={13} />, color: '#a78bfa' },
-  ]
-
-  return (
-    <div className="flex flex-col gap-6">
-      {/* KPI row */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {kpis.map(k => (
-          <div key={k.label} className="bg-[#111113] border border-[#1c1c1f] rounded-sm p-4">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-[9px] font-mono uppercase tracking-widest text-[#3a3a3d]">{k.label}</span>
-              <span style={{ color: k.color }}>{k.icon}</span>
-            </div>
-            <p className="text-2xl font-bold font-mono" style={{ color: k.color }}>{k.value}</p>
-            <p className="text-[10px] font-mono text-[#3a3a3d] mt-1">{k.sub}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* Machine quick status */}
-      <div className="bg-[#111113] border border-[#1c1c1f] rounded-sm">
-        <div className="px-5 py-3.5 border-b border-[#1c1c1f] flex items-center justify-between">
-          <p className="text-xs font-semibold text-[#e4e4e7]">Statut du parc</p>
-          <span className="text-[9px] font-mono text-[#3a3a3d]">{machines.length} machines</span>
-        </div>
-        <div className="divide-y divide-[#111113]">
-          {machines.map(m => (
-            <div key={m.id} className="px-5 py-3 flex items-center gap-4">
-              <div className="flex items-center gap-2 w-44 min-w-0">
-                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: getStatusColor(m.status) }} />
-                <div className="min-w-0">
-                  <p className="text-xs text-[#e4e4e7] truncate">{m.name}</p>
-                  <p className="text-[9px] font-mono text-[#3a3a3d]">{m.id}</p>
-                </div>
-              </div>
-              <div className="flex-1">
-                <HealthBar value={m.healthScore} />
-              </div>
-              <span className="text-xs font-mono w-10 text-right" style={{ color: getRulColor(m.rul) }}>{m.rul}d</span>
-              <span
-                className="text-[9px] font-mono px-2 py-0.5 rounded-sm w-16 text-center flex-shrink-0"
-                style={{ color: getStatusColor(m.status), background: getStatusBg(m.status) }}
-              >
-                {m.status.toUpperCase()}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Active alerts */}
-      {alerts.filter(a => !a.resolved).length > 0 && (
-        <div className="bg-[#111113] border border-[#1c1c1f] rounded-sm">
-          <div className="px-5 py-3.5 border-b border-[#1c1c1f] flex items-center gap-2">
-            <AlertTriangle size={12} className="text-[#f59e0b]" />
-            <p className="text-xs font-semibold text-[#e4e4e7]">Alertes actives</p>
-          </div>
-          <div className="divide-y divide-[#111113]">
-            {alerts.filter(a => !a.resolved).map(a => (
-              <div key={a.id} className="px-5 py-3 flex items-start gap-3">
-                <span className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: getSeverityColor(a.severity) }} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-[#e4e4e7] leading-snug">{a.message}</p>
-                  <p className="text-[9px] font-mono text-[#3a3a3d] mt-0.5">{a.machineName} · {a.timestamp}</p>
-                </div>
-                <span
-                  className="text-[8px] font-mono uppercase px-1.5 py-0.5 rounded-sm flex-shrink-0"
-                  style={{ color: getSeverityColor(a.severity), background: `${getSeverityColor(a.severity)}15` }}
-                >
-                  {a.severity}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MACHINES SECTION
-// ─────────────────────────────────────────────────────────────────────────────
-
-function MachinesSection({ machines }: { machines: ClientMachine[] }) {
-  const [sel, setSel] = useState(machines[0]?.id ?? '')
-  const machine = machines.find(m => m.id === sel) ?? machines[0]
-
-  return (
-    <div className="flex flex-col gap-4">
-      {/* Machine selector */}
-      <div className="flex flex-wrap gap-2">
-        {machines.map(m => (
-          <button
-            key={m.id}
-            onClick={() => setSel(m.id)}
-            className={cn(
-              'px-3.5 py-2 text-xs font-mono rounded-sm border transition-all',
-              sel === m.id
-                ? 'border-[#e8650a] text-[#e8650a] bg-[#e8650a]/8'
-                : 'border-[#1c1c1f] text-[#52525b] hover:border-[#27272a] hover:text-[#71717a]'
-            )}
-          >
-            <span className="w-1.5 h-1.5 rounded-full inline-block mr-1.5" style={{ backgroundColor: getStatusColor(m.status) }} />
-            {m.id}
-          </button>
-        ))}
-      </div>
-
-      {machine && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          {/* Identity card */}
-          <div className="bg-[#111113] border border-[#1c1c1f] rounded-sm p-5 flex flex-col gap-4">
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-xs font-semibold text-[#e4e4e7]">{machine.name}</p>
-                <p className="text-[10px] font-mono text-[#3a3a3d] mt-0.5">{machine.id} · {machine.type}</p>
-                <p className="text-[10px] font-mono text-[#3a3a3d]">{machine.location}</p>
-              </div>
-              <span
-                className="text-[9px] font-mono uppercase px-2 py-1 rounded-sm"
-                style={{ color: getStatusColor(machine.status), background: getStatusBg(machine.status) }}
-              >
-                {machine.status}
-              </span>
-            </div>
-            <div>
-              <div className="flex justify-between text-[9px] font-mono mb-1.5">
-                <span className="text-[#3a3a3d]">Health Score</span>
-                <span style={{ color: machine.healthScore >= 80 ? '#10b981' : machine.healthScore >= 55 ? '#f59e0b' : '#ef4444' }}>
-                  {machine.healthScore}%
-                </span>
-              </div>
-              <HealthBar value={machine.healthScore} />
-            </div>
-            <div>
-              <div className="flex justify-between text-[9px] font-mono mb-1.5">
-                <span className="text-[#3a3a3d]">RUL Estimate</span>
-                <span style={{ color: getRulColor(machine.rul) }}>{machine.rul} days</span>
-              </div>
-              <RulBar value={machine.rul} />
-            </div>
-            <p className="text-[9px] font-mono text-[#27272a]">Last sync: {machine.lastSync}</p>
-          </div>
-
-          {/* Sensor grid */}
-          <div className="lg:col-span-2 grid grid-cols-2 sm:grid-cols-3 gap-3">
-            {[
-              { label: 'Température', value: `${machine.temperature}°C`, icon: <Thermometer size={12} />, warn: machine.temperature > 400 },
-              { label: 'Vibration',   value: `${machine.vibration}g`,    icon: <Activity size={12} />,    warn: machine.vibration > 1.0 },
-              { label: 'Pression',    value: machine.pressure !== 0 ? `${machine.pressure} bar` : 'N/A', icon: <Gauge size={12} />, warn: false },
-              { label: 'RPM',         value: machine.rpm > 0 ? machine.rpm.toLocaleString() : 'N/A',     icon: <RefreshCw size={12} />, warn: false },
-              { label: 'Courant',     value: machine.current > 0 ? `${machine.current} A` : 'N/A',       icon: <Zap size={12} />,       warn: false },
-              { label: 'RUL',         value: `${machine.rul} jours`,     icon: <Clock size={12} />,       warn: machine.rul < 45 },
-            ].map(s => (
-              <div key={s.label} className="bg-[#0d0d0f] border border-[#1a1a1d] rounded-sm p-3.5">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-[9px] font-mono uppercase tracking-wider text-[#3a3a3d]">{s.label}</span>
-                  <span style={{ color: s.warn ? '#f59e0b' : '#27272a' }}>{s.icon}</span>
-                </div>
-                <p className="text-base font-bold font-mono" style={{ color: s.warn ? '#f59e0b' : '#a1a1aa' }}>
-                  {s.value}
-                </p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// LIVE MONITORING SECTION
-// ─────────────────────────────────────────────────────────────────────────────
-
-type SensorHistory = {
-  temp: number[]
-  vibration: number[]
-  health: number[]
-  rpm: number[]
-}
-
-function MonitoringSection({ machines }: { machines: ClientMachine[] }) {
-  const [sel, setSel]         = useState(machines[0]?.id ?? '')
-  const [running, setRunning] = useState(false)
-  const [tick, setTick]       = useState(0)
-  const histRef = useRef<Record<string, SensorHistory>>({})
-  const [hist, setHist]       = useState<Record<string, SensorHistory>>({})
-  const intervalRef           = useRef<ReturnType<typeof setInterval> | null>(null)
-
-  const machine = machines.find(m => m.id === sel) ?? machines[0]
-
-  // init history
   useEffect(() => {
-    machines.forEach(m => {
-      histRef.current[m.id] = { temp: [m.temperature], vibration: [m.vibration], health: [m.healthScore], rpm: [m.rpm] }
-    })
-    setHist({ ...histRef.current })
-  }, [machines])
+    onSetSection(current.tab)
+    const t = setTimeout(() => {
+      const el = document.querySelector(`[data-guided="${current.target}"]`)
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 150)
+    return () => clearTimeout(t)
+  }, [step, current.tab, current.target, onSetSection])
 
-  const tickFn = useCallback(() => {
-    setTick(t => {
-      machines.forEach(m => {
-        const h = histRef.current[m.id]
-        if (!h) return
-        const jitter = (range: number) => (Math.random() - 0.5) * range
-        const next = {
-          temp:      [...h.temp.slice(-59),      Math.max(0,  m.temperature  + jitter(12))],
-          vibration: [...h.vibration.slice(-59), Math.max(0,  m.vibration    + jitter(0.2))],
-          health:    [...h.health.slice(-59),    Math.min(100, Math.max(0, m.healthScore + jitter(3)))],
-          rpm:       [...h.rpm.slice(-59),       Math.max(0,  m.rpm          + jitter(40))],
-        }
-        histRef.current[m.id] = next
-      })
-      setHist({ ...histRef.current })
-      return t + 1
-    })
-  }, [machines])
-
-  function start()  { if (intervalRef.current) clearInterval(intervalRef.current); intervalRef.current = setInterval(tickFn, 1000); setRunning(true) }
-  function stop()   { if (intervalRef.current) clearInterval(intervalRef.current); setRunning(false) }
-  useEffect(() => () => { if (intervalRef.current) clearInterval(intervalRef.current) }, [])
-
-  const selHist = hist[sel] ?? { temp: [], vibration: [], health: [], rpm: [] }
-  const latestTemp = selHist.temp[selHist.temp.length - 1] ?? machine?.temperature ?? 0
-  const latestVib  = selHist.vibration[selHist.vibration.length - 1] ?? machine?.vibration ?? 0
-  const latestHlt  = selHist.health[selHist.health.length - 1] ?? machine?.healthScore ?? 0
-  const latestRpm  = selHist.rpm[selHist.rpm.length - 1] ?? machine?.rpm ?? 0
+  useEffect(() => {
+    const styleId = 'guided-highlight-style'
+    let tag = document.getElementById(styleId) as HTMLStyleElement | null
+    if (!tag) { tag = document.createElement('style'); tag.id = styleId; document.head.appendChild(tag) }
+    tag.textContent = `
+      [data-guided="${current.target}"] {
+        outline: 2px solid ${current.color} !important;
+        outline-offset: 4px;
+        box-shadow: 0 0 0 6px ${current.color}15, 0 0 28px ${current.color}25 !important;
+        border-radius: 2px;
+        transition: outline 0.35s ease, box-shadow 0.35s ease;
+      }
+    `
+    return () => { if (tag) tag.textContent = '' }
+  }, [current.target, current.color])
 
   return (
-    <div className="flex flex-col gap-4">
-      {/* Controls */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <div className="flex flex-wrap gap-2">
-          {machines.map(m => (
-            <button key={m.id} onClick={() => setSel(m.id)}
-              className={cn(
-                'px-3 py-1.5 text-[10px] font-mono rounded-sm border transition-all',
-                sel === m.id ? 'border-[#e8650a] text-[#e8650a] bg-[#e8650a]/8' : 'border-[#1c1c1f] text-[#52525b] hover:border-[#27272a]'
-              )}
-            >
-              <span className="w-1.5 h-1.5 rounded-full inline-block mr-1.5" style={{ backgroundColor: getStatusColor(m.status) }} />
-              {m.id}
-            </button>
-          ))}
-        </div>
-        <div className="ml-auto flex items-center gap-2">
-          {running && (
-            <span className="flex items-center gap-1.5 text-[9px] font-mono text-[#10b981]">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#10b981] animate-pulse" />
-              LIVE · tick {tick}
-            </span>
-          )}
-          <button onClick={running ? stop : start}
-            className={cn(
-              'px-4 py-2 text-xs font-mono rounded-sm border transition-all',
-              running
-                ? 'border-[#ef4444]/40 text-[#ef4444] hover:bg-[#ef4444]/8'
-                : 'border-[#e8650a]/40 text-[#e8650a] hover:bg-[#e8650a]/8'
-            )}
-          >
-            {running ? 'Arrêter le flux' : 'Démarrer le flux live'}
+    <>
+      <div className="fixed inset-0 z-[105] pointer-events-none bg-[#09090b]/35" />
+      <div
+        className="fixed bottom-6 right-6 z-[110] w-80 bg-[#0d0d0f] border rounded-sm shadow-2xl overflow-hidden"
+        style={{ borderColor: current.color + '40', boxShadow: `0 0 40px ${current.color}20, 0 20px 40px rgba(0,0,0,0.8)` }}
+      >
+        <div className="h-0.5 w-full" style={{ background: `linear-gradient(90deg, transparent, ${current.color}, transparent)` }} />
+        <div className="flex items-center justify-between px-4 py-3 border-b border-[#1c1c1f]">
+          <div className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded-sm flex items-center justify-center shrink-0"
+              style={{ background: `${current.color}18`, border: `1px solid ${current.color}35` }}>
+              <Icon size={13} style={{ color: current.color }} />
+            </div>
+            <div>
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <span className="text-[8px] font-mono text-[#52525b]">ÉTAPE {current.step} / {GUIDED_STEPS.length}</span>
+                <span className="text-[8px] font-mono px-1.5 py-0.5 rounded-sm"
+                  style={{ color: current.color, background: `${current.color}12`, border: `1px solid ${current.color}25` }}>
+                  VISITE GUIDÉE
+                </span>
+              </div>
+              <p className="text-xs font-bold text-[#fafafa] leading-tight">{current.title}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-[#52525b] hover:text-[#a1a1aa] transition-colors shrink-0 ml-2">
+            <X size={14} />
           </button>
         </div>
-      </div>
-
-      {/* Live values */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        {[
-          { label: 'Température', value: `${latestTemp.toFixed(1)}°C`,  data: selHist.temp,      color: latestTemp > 400 ? '#ef4444' : '#f59e0b' },
-          { label: 'Vibration',   value: `${latestVib.toFixed(2)}g`,    data: selHist.vibration, color: latestVib  > 1.5 ? '#ef4444' : '#3b82f6' },
-          { label: 'Santé',       value: `${latestHlt.toFixed(0)}%`,    data: selHist.health,    color: latestHlt  < 55  ? '#ef4444' : latestHlt < 80 ? '#f59e0b' : '#10b981' },
-          { label: 'RPM',         value: latestRpm.toFixed(0),          data: selHist.rpm,       color: '#a78bfa' },
-        ].map(s => (
-          <div key={s.label} className="bg-[#111113] border border-[#1c1c1f] rounded-sm p-4">
-            <p className="text-[9px] font-mono uppercase tracking-wider text-[#3a3a3d] mb-2">{s.label}</p>
-            <p className="text-xl font-bold font-mono mb-2" style={{ color: s.color }}>{s.value}</p>
-            <MiniSparkline data={s.data.length > 1 ? s.data : [s.data[0] ?? 0, s.data[0] ?? 0]} color={s.color} />
-          </div>
-        ))}
-      </div>
-
-      {/* Sensor feed table */}
-      <div className="bg-[#111113] border border-[#1c1c1f] rounded-sm">
-        <div className="px-5 py-3.5 border-b border-[#1c1c1f]">
-          <p className="text-xs font-semibold text-[#e4e4e7]">Toutes les machines — Lectures en cours</p>
+        <div className="px-4 py-2.5 border-b border-[#111113]" style={{ background: `${current.color}08` }}>
+          <p className="text-[10px] font-mono leading-relaxed" style={{ color: current.color }}>{current.subtitle}</p>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs font-mono">
-            <thead>
-              <tr className="border-b border-[#1c1c1f]">
-                {['Machine', 'Statut', 'Temp (°C)', 'Vibration (g)', 'Pression (bar)', 'RPM', 'Courant (A)', 'Santé'].map(h => (
-                  <th key={h} className="px-4 py-2.5 text-left text-[9px] font-mono uppercase tracking-wider text-[#3a3a3d] whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[#111113]">
-              {machines.map(m => (
-                <tr key={m.id} className={cn('transition-colors', sel === m.id ? 'bg-[#e8650a]/4' : 'hover:bg-[#111113]')}>
-                  <td className="px-4 py-2.5">
-                    <p className="text-[#e4e4e7]">{m.name}</p>
-                    <p className="text-[9px] text-[#3a3a3d]">{m.id}</p>
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <span className="text-[9px] px-1.5 py-0.5 rounded-sm" style={{ color: getStatusColor(m.status), background: getStatusBg(m.status) }}>
-                      {m.status.toUpperCase()}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5" style={{ color: m.temperature > 450 ? '#ef4444' : m.temperature > 380 ? '#f59e0b' : '#a1a1aa' }}>{m.temperature}</td>
-                  <td className="px-4 py-2.5" style={{ color: m.vibration > 2.0 ? '#ef4444' : m.vibration > 1.2 ? '#f59e0b' : '#a1a1aa' }}>{m.vibration}</td>
-                  <td className="px-4 py-2.5 text-[#a1a1aa]">{m.pressure > 0 ? m.pressure : '—'}</td>
-                  <td className="px-4 py-2.5 text-[#a1a1aa]">{m.rpm > 0 ? m.rpm.toLocaleString() : '—'}</td>
-                  <td className="px-4 py-2.5 text-[#a1a1aa]">{m.current > 0 ? m.current : '—'}</td>
-                  <td className="px-4 py-2.5">
-                    <div className="flex items-center gap-2">
-                      <span style={{ color: m.healthScore >= 80 ? '#10b981' : m.healthScore >= 55 ? '#f59e0b' : '#ef4444' }}>{m.healthScore}%</span>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AI INSIGHTS SECTION
-// ─────────────────────────────────────────────────────────────────────────────
-
-function AISection({ machines }: { machines: ClientMachine[] }) {
-  const [sel, setSel] = useState(machines[0]?.id ?? '')
-  const machine = machines.find(m => m.id === sel) ?? machines[0]
-
-  if (!machine) return null
-
-  const ai = deriveAI(machine)
-  const models = [
-    { key: 'lstm', label: 'LSTM',           color: '#e8650a', v: ai.lstm },
-    { key: 'gru',  label: 'GRU',            color: '#a78bfa', v: ai.gru  },
-    { key: 'rf',   label: 'Random Forest',  color: '#3b82f6', v: ai.rf   },
-    { key: 'gb',   label: 'Gradient Boost', color: '#10b981', v: ai.gb   },
-  ]
-
-  const rec = ai.status === 'critical'
-    ? 'Immediate intervention required. Component replacement within 5 working days. Notify maintenance team.'
-    : ai.status === 'warning'
-    ? 'Schedule preventive maintenance within 2–3 weeks. Inspect bearings, seals, and lubrication system.'
-    : 'Operating within normal parameters. Continue standard inspection cycle. Next review at RUL = 40 days.'
-
-  return (
-    <div className="flex flex-col gap-4">
-      {/* Machine picker */}
-      <div className="flex flex-wrap gap-2">
-        {machines.map(m => {
-          const mAI = deriveAI(m)
-          return (
-            <button key={m.id} onClick={() => setSel(m.id)}
-              className={cn(
-                'px-3.5 py-2 text-[10px] font-mono rounded-sm border transition-all',
-                sel === m.id ? 'border-[#e8650a] text-[#e8650a] bg-[#e8650a]/8' : 'border-[#1c1c1f] text-[#52525b] hover:border-[#27272a]'
-              )}
-            >
-              {m.id}
-              <span className="ml-2 text-[8px]" style={{ color: mAI.status === 'critical' ? '#ef4444' : mAI.status === 'warning' ? '#f59e0b' : '#10b981' }}>
-                {mAI.ensemble}d
-              </span>
-            </button>
-          )
-        })}
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Ensemble card */}
-        <div className="bg-[#111113] border border-[#1c1c1f] rounded-sm p-5">
-          <div className="flex items-center justify-between mb-5">
-            <p className="text-xs font-semibold text-[#e4e4e7]">{machine.name}</p>
-            <span
-              className="text-[8px] font-mono uppercase px-2 py-0.5 rounded-sm border"
-              style={{ color: getStatusColor(ai.status as ClientMachine['status']), borderColor: `${getStatusColor(ai.status as ClientMachine['status'])}30`, background: getStatusBg(ai.status as ClientMachine['status']) }}
-            >
-              {ai.status}
-            </span>
-          </div>
-          <div className="text-center py-3 mb-4 border border-[#1c1c1f] rounded-sm">
-            <p className="text-[9px] font-mono text-[#3a3a3d] mb-1 uppercase tracking-widest">Ensemble RUL</p>
-            <p className="text-4xl font-bold font-mono" style={{ color: getRulColor(ai.ensemble) }}>{ai.ensemble}d</p>
-            <p className="text-[9px] font-mono text-[#3a3a3d] mt-1">LSTM 35% · GRU 30% · RF 20% · GB 15%</p>
-          </div>
-          {/* Model breakdown */}
-          <div className="grid grid-cols-2 gap-2">
-            {models.map(mdl => (
-              <div key={mdl.key} className="bg-[#0d0d0f] border border-[#1a1a1d] rounded-sm px-3 py-2.5">
-                <p className="text-[8px] font-mono uppercase mb-1" style={{ color: mdl.color }}>{mdl.label}</p>
-                <p className="text-sm font-bold font-mono" style={{ color: mdl.color }}>{mdl.v}d</p>
-              </div>
-            ))}
+        <div className="px-4 py-4">
+          <div className="flex gap-2.5">
+            <div className="mt-0.5 shrink-0 w-4 h-4 rounded-full flex items-center justify-center"
+              style={{ background: `${current.color}18`, border: `1px solid ${current.color}30` }}>
+              <ArrowRight size={9} style={{ color: current.color }} />
+            </div>
+            <p className="text-[11px] text-[#71717a] leading-relaxed">{current.instruction}</p>
           </div>
         </div>
-
-        {/* Recommendations + risk */}
-        <div className="flex flex-col gap-3">
-          {/* Risk matrix */}
-          <div className="bg-[#111113] border border-[#1c1c1f] rounded-sm p-5">
-            <p className="text-xs font-semibold text-[#e4e4e7] mb-4">Risk Assessment</p>
+        {current.step === 5 && (
+          <div className="mx-4 mb-3 border border-[#1c1c1f] rounded-sm overflow-hidden">
             {[
-              { label: 'Failure Probability (30d)', value: ai.status === 'critical' ? 87 : ai.status === 'warning' ? 42 : 8, color: ai.status === 'critical' ? '#ef4444' : ai.status === 'warning' ? '#f59e0b' : '#10b981' },
-              { label: 'Component Wear Rate',       value: Math.round((1 - machine.healthScore / 100) * 100), color: '#a78bfa' },
-              { label: 'Anomaly Confidence',        value: machine.healthScore < 50 ? 91 : machine.healthScore < 70 ? 55 : 12, color: '#3b82f6' },
-            ].map(r => (
-              <div key={r.label} className="mb-3 last:mb-0">
-                <div className="flex justify-between text-[9px] font-mono mb-1.5">
-                  <span className="text-[#52525b]">{r.label}</span>
-                  <span style={{ color: r.color }}>{r.value}%</span>
-                </div>
-                <div className="w-full h-1 bg-[#1c1c1f] rounded-full overflow-hidden">
-                  <div className="h-full rounded-full" style={{ width: `${r.value}%`, backgroundColor: r.color }} />
-                </div>
+              { label: 'Panne imprévue',     value: '320 000 DZD', color: '#ef4444' },
+              { label: 'Maintenance planif.', value: '45 000 DZD',  color: '#10b981' },
+              { label: 'Économie',            value: '275 000 DZD', color: '#e8650a' },
+            ].map(row => (
+              <div key={row.label} className="flex items-center justify-between px-3 py-2 border-b border-[#111113] last:border-0">
+                <span className="text-[9px] font-mono text-[#3a3a3d]">{row.label}</span>
+                <span className="text-[10px] font-bold font-mono" style={{ color: row.color }}>{row.value}</span>
               </div>
             ))}
           </div>
-
-          {/* Maintenance recommendation */}
-          <div className="bg-[#111113] border border-[#1c1c1f] rounded-sm p-5 flex-1">
-            <div className="flex items-center gap-2 mb-3">
-              <CheckCircle2 size={12} className="text-[#e8650a]" />
-              <p className="text-xs font-semibold text-[#e4e4e7]">AI Recommendation</p>
-            </div>
-            <p className="text-xs text-[#71717a] leading-relaxed">{rec}</p>
-            <div className="mt-4 pt-3 border-t border-[#1c1c1f] grid grid-cols-2 gap-2">
-              {[
-                { label: 'Health Score',  value: `${machine.healthScore}%` },
-                { label: 'RUL Estimate', value: `${machine.rul} days` },
-                { label: 'Anomaly Flag', value: machine.healthScore < 55 ? 'Detected' : 'Clear' },
-                { label: 'Next Service', value: machine.rul <= 20 ? 'Urgent' : machine.rul <= 45 ? '2–3 weeks' : '4+ weeks' },
-              ].map(it => (
-                <div key={it.label} className="bg-[#0d0d0f] rounded-sm px-2.5 py-2">
-                  <p className="text-[8px] font-mono text-[#3a3a3d] mb-0.5">{it.label}</p>
-                  <p className="text-[10px] font-mono text-[#a1a1aa]">{it.value}</p>
-                </div>
-              ))}
-            </div>
+        )}
+        {current.step === 5 && (
+          <div className="flex gap-2 px-4 pb-3">
+            <Link href="/contact"
+              className="flex-1 flex items-center justify-center gap-1.5 bg-[#e8650a] hover:bg-[#d15a08] text-white text-[10px] font-semibold py-2 rounded-sm transition-all">
+              <Wrench size={10} /> Maintenance
+            </Link>
+            <Link href="/contact"
+              className="flex-1 flex items-center justify-center gap-1.5 border border-[#27272a] hover:border-[#52525b] text-[#71717a] hover:text-[#fafafa] text-[10px] font-medium py-2 rounded-sm transition-colors">
+              <TrendingUp size={10} /> Déployer
+            </Link>
           </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// REPORTS SECTION
-// ─────────────────────────────────────────────────────────────────────────────
-
-type ReportItem = { id: string, title: string, type: string, date: string, size: string }
-function ReportsSection({ alerts, reports }: { alerts: ClientAlert[], reports: ReportItem[] }) {
-  const typeColor: Record<string, string> = { monthly: '#3b82f6', alert: '#ef4444', maintenance: '#f59e0b', prediction: '#a78bfa' }
-
-  return (
-    <div className="flex flex-col gap-4">
-      {/* Report list */}
-      <div className="bg-[#111113] border border-[#1c1c1f] rounded-sm">
-        <div className="px-5 py-3.5 border-b border-[#1c1c1f] flex items-center justify-between">
-          <p className="text-xs font-semibold text-[#e4e4e7]">Available Reports</p>
-          <span className="text-[9px] font-mono text-[#3a3a3d]">{reports.length} documents</span>
-        </div>
-        <div className="divide-y divide-[#111113]">
-          {reports.map(r => (
-            <div key={r.id} className="px-5 py-3.5 flex items-center gap-4 hover:bg-[#111113]/50 transition-colors group">
-              <FileText size={13} style={{ color: typeColor[r.type] ?? '#52525b' }} className="flex-shrink-0" />
-              <div className="flex-1 min-w-0">
-                <p className="text-xs text-[#e4e4e7] truncate">{r.title}</p>
-                <p className="text-[9px] font-mono text-[#3a3a3d] mt-0.5">{r.date} · {r.size}</p>
-              </div>
-              <span className="text-[8px] font-mono uppercase px-1.5 py-0.5 rounded-sm" style={{ color: typeColor[r.type], background: `${typeColor[r.type]}15` }}>
-                {r.type}
-              </span>
-              <button className="flex items-center gap-1 text-[9px] font-mono text-[#27272a] group-hover:text-[#e8650a] transition-colors">
-                <Download size={10} /> Export
+        )}
+        <div className="flex items-center justify-between px-4 pb-4">
+          <div className="flex items-center gap-1.5">
+            {GUIDED_STEPS.map((_, i) => (
+              <button key={i} onClick={() => setStep(i)}
+                className="rounded-full transition-all duration-200"
+                style={{
+                  width: i === step ? '18px' : '5px', height: '5px',
+                  background: i === step ? current.color : i < step ? `${current.color}55` : '#27272a',
+                }} />
+            ))}
+          </div>
+          <div className="flex items-center gap-2">
+            {step > 0 && (
+              <button onClick={() => setStep(s => s - 1)}
+                className="text-[10px] font-mono text-[#52525b] hover:text-[#a1a1aa] px-2.5 py-1.5 border border-[#1c1c1f] rounded-sm transition-colors">
+                Précédent
               </button>
-            </div>
-          ))}
+            )}
+            <button onClick={() => isLast ? onClose() : setStep(s => s + 1)}
+              className="flex items-center gap-1.5 text-[10px] font-semibold text-white px-3 py-1.5 rounded-sm transition-all"
+              style={{ background: current.color }}>
+              {isLast ? <><CheckCircle2 size={11} /> Terminer</> : <>Suivant <ChevronRight size={11} /></>}
+            </button>
+          </div>
         </div>
       </div>
-
-      {/* Alert history */}
-      <div className="bg-[#111113] border border-[#1c1c1f] rounded-sm">
-        <div className="px-5 py-3.5 border-b border-[#1c1c1f]">
-          <p className="text-xs font-semibold text-[#e4e4e7]">Alert History</p>
-        </div>
-        <div className="divide-y divide-[#111113]">
-          {alerts.map(a => (
-            <div key={a.id} className="px-5 py-3 flex items-start gap-3">
-              <span className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: getSeverityColor(a.severity) }} />
-              <div className="flex-1 min-w-0">
-                <p className="text-xs text-[#e4e4e7] leading-snug">{a.message}</p>
-                <p className="text-[9px] font-mono text-[#3a3a3d] mt-0.5">{a.machineName} · {a.timestamp}</p>
-              </div>
-              <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                <span className="text-[8px] font-mono uppercase px-1.5 py-0.5 rounded-sm" style={{ color: getSeverityColor(a.severity), background: `${getSeverityColor(a.severity)}15` }}>
-                  {a.severity}
-                </span>
-                <span className="text-[8px] font-mono text-[#3a3a3d]">{a.resolved ? 'Resolved' : 'Open'}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
+    </>
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ACCOUNT SECTION
-// ─────────────────────────────────────────────────────────────────────────────
-
-function AccountSection({ company, email, logout }: { company: import('@/lib/auth').Company, email: string, logout: () => void }) {
-  const planColor = getPlanColor(company.plan)
-  const planLabel = getPlanLabel(company.plan)
+function IntroModal({ companyName, machineCount, criticalCount, onStartGuided, onSkip }: {
+  companyName: string
+  machineCount: number
+  criticalCount: number
+  onStartGuided: () => void
+  onSkip: () => void
+}) {
+  const [bootStep, setBootStep] = useState(0)
+  useEffect(() => {
+    const t1 = setTimeout(() => setBootStep(1), 400)
+    const t2 = setTimeout(() => setBootStep(2), 900)
+    return () => { clearTimeout(t1); clearTimeout(t2) }
+  }, [])
 
   return (
-    <div className="flex flex-col gap-4 max-w-2xl">
-      {/* Company profile */}
-      <div className="bg-[#111113] border border-[#1c1c1f] rounded-sm p-6">
-        <div className="flex items-start justify-between mb-5">
-          <div>
-            <p className="text-[9px] font-mono uppercase tracking-widest text-[#3a3a3d] mb-1">Company Profile</p>
-            <h2 className="text-sm font-semibold text-[#e4e4e7]">{company.name}</h2>
-            <p className="text-[10px] font-mono text-[#52525b] mt-0.5">{company.industry} · {company.location}</p>
+    <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-[#09090b]/80 backdrop-blur-sm" />
+      <div className="relative w-full max-w-[440px] bg-[#0a0a0c] border border-[#27272a] rounded-sm shadow-2xl"
+        style={{ boxShadow: '0 0 80px rgba(232,101,10,0.08), 0 30px 60px rgba(0,0,0,0.9)' }}>
+        <div className="h-0.5 w-full bg-gradient-to-r from-transparent via-[#e8650a] to-transparent" />
+        <div className="px-5 pt-5 pb-4 border-b border-[#1c1c1f]">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#10b981] opacity-75" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-[#10b981]" />
+            </span>
+            <span className="text-[9px] font-mono uppercase tracking-widest text-[#10b981]">Système actif</span>
           </div>
-          <span className="text-[9px] font-mono px-2.5 py-1 rounded-sm border" style={{ color: planColor, borderColor: `${planColor}30`, background: `${planColor}12` }}>
-            {planLabel}
-          </span>
+          <h2 className="text-base font-bold text-[#fafafa] tracking-tight mb-1">Bienvenue, {companyName}</h2>
+          <p className="text-[10px] text-[#52525b] font-mono">Plateforme de surveillance industrielle · Espace Client</p>
         </div>
-        <div className="grid grid-cols-2 gap-3">
-          {[
-            { label: 'Contact Person', value: company.contact },
-            { label: 'Title',          value: company.contactTitle },
-            { label: 'Phone',          value: company.phone },
-            { label: 'Login Email',    value: email },
-            { label: 'Plan',           value: `${planLabel} Plan` },
-            { label: 'Plan Expiry',    value: company.planExpiry },
-          ].map(f => (
-            <div key={f.label} className="bg-[#0d0d0f] border border-[#1a1a1d] rounded-sm px-3.5 py-2.5">
-              <p className="text-[8px] font-mono uppercase tracking-wider text-[#3a3a3d] mb-1">{f.label}</p>
-              <p className="text-xs font-mono text-[#a1a1aa]">{f.value}</p>
+        <div className="px-5 py-4 space-y-3">
+          <ul className="space-y-1.5">
+            {[
+              { icon: <Cpu size={10} />,      text: `${machineCount} machines connectées et surveillées`, color: '#3b82f6' },
+              { icon: <Activity size={10} />, text: 'Surveillance IA en temps réel activée',              color: '#a78bfa' },
+              { icon: <Brain size={10} />,    text: 'Modèles prédictifs LSTM, GRU, RF, GB actifs',        color: '#e8650a' },
+              { icon: <Bell size={10} />,     text: "Détection d'anomalies en cours",                     color: '#ef4444' },
+            ].map((item, i) => (
+              <li key={i}
+                className={`flex items-center gap-2 text-xs text-[#71717a] transition-all duration-300 ${bootStep > 0 ? 'opacity-100' : 'opacity-0'}`}
+                style={{ transitionDelay: `${i * 100}ms` }}>
+                <span style={{ color: item.color }}>{item.icon}</span>
+                {item.text}
+              </li>
+            ))}
+          </ul>
+          {criticalCount > 0 && (
+            <div className={`flex items-start gap-3 bg-[#ef4444]/6 border border-[#ef4444]/20 rounded-sm px-4 py-3 transition-all duration-500 ${bootStep >= 2 ? 'opacity-100' : 'opacity-0'}`}>
+              <AlertTriangle size={14} className="text-[#ef4444] shrink-0 mt-0.5" />
+              <p className="text-[11px] text-[#a1a1aa] leading-relaxed">
+                <span className="text-[#ef4444] font-semibold">{criticalCount} alerte{criticalCount > 1 ? 's' : ''} critique{criticalCount > 1 ? 's' : ''}</span> — intervention immédiate requise.
+              </p>
             </div>
-          ))}
+          )}
         </div>
-      </div>
-
-      {/* Subscription */}
-      <div className="bg-[#111113] border border-[#1c1c1f] rounded-sm p-5">
-        <p className="text-xs font-semibold text-[#e4e4e7] mb-4">Subscription & Billing</p>
-        <div className="flex items-center justify-between p-4 bg-[#0d0d0f] border border-[#1a1a1d] rounded-sm mb-3">
-          <div>
-            <p className="text-sm font-semibold" style={{ color: planColor }}>{planLabel} Plan</p>
-            <p className="text-[10px] font-mono text-[#3a3a3d] mt-0.5">Active · expires {company.planExpiry}</p>
+        <div className="px-5 pt-2 pb-5 space-y-2.5">
+          <div className="flex flex-col sm:flex-row gap-2">
+            <button onClick={onStartGuided}
+              className="flex-1 flex items-center justify-center gap-2 bg-[#e8650a] hover:bg-[#d15a08] text-white text-sm font-semibold py-2.5 px-4 rounded-sm transition-all hover:shadow-[0_0_20px_rgba(232,101,10,0.30)]">
+              <Play size={12} fill="white" /> Visite guidée
+            </button>
+            <button onClick={onSkip}
+              className="flex-1 flex items-center justify-center gap-2 border border-[#27272a] hover:border-[#3a3a3d] text-[#71717a] hover:text-[#a1a1aa] text-sm font-medium py-2.5 px-4 rounded-sm transition-colors">
+              Explorer librement <ArrowRight size={12} />
+            </button>
           </div>
-          <Shield size={20} style={{ color: planColor }} />
+          <p className="text-[9px] font-mono text-[#27272a] text-center">Espace sécurisé · {companyName}</p>
         </div>
-        <p className="text-[10px] font-mono text-[#27272a] leading-relaxed">
-          To upgrade, renew, or modify your subscription, contact your Mainteligence account manager.
-        </p>
-      </div>
-
-      {/* Sign out */}
-      <div className="bg-[#111113] border border-[#1c1c1f] rounded-sm p-5">
-        <p className="text-xs font-semibold text-[#e4e4e7] mb-3">Session</p>
-        <p className="text-[10px] font-mono text-[#52525b] mb-4">Signed in as <span className="text-[#a1a1aa]">{email}</span></p>
-        <button
-          onClick={logout}
-          className="flex items-center gap-2 text-xs font-mono text-[#ef4444] border border-[#ef4444]/25 hover:bg-[#ef4444]/8 px-4 py-2.5 rounded-sm transition-colors"
-        >
-          <LogOut size={12} /> Sign Out
-        </button>
       </div>
     </div>
   )
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CLIENT LAYOUT + SHELL
-// ─────────────────────────────────────────────────────────────────────────────
 
 export default function ClientDashboardPage() {
   const router = useRouter()
   const { user, loading, logout } = useAuth()
-  const [section, setSection] = useState<ClientSection>('overview')
+  const [section, setSection]     = useState('overview')
+  const [introOpen, setIntroOpen] = useState(true)
+  const [guidedOpen, setGuidedOpen] = useState(false)
 
   useEffect(() => {
     if (!loading && !user) router.replace('/login')
@@ -741,170 +277,76 @@ export default function ClientDashboardPage() {
       <div className="min-h-screen bg-[#09090b] flex items-center justify-center">
         <div className="flex items-center gap-3 text-xs font-mono text-[#3a3a3d]">
           <span className="w-4 h-4 border-2 border-[#27272a] border-t-[#e8650a] rounded-full animate-spin" />
-          Authenticating...
+          Authentification...
         </div>
       </div>
     )
   }
 
-  const { company, email } = user
-
-  function handleLogout() {
-    logout()
-    router.push('/')
-  }
-
-  const sectionLabel = NAV_ITEMS.find(n => n.id === section)?.label ?? 'Overview'
+  const { company } = user
   const criticalCount = company.alerts.filter(a => a.severity === 'critical' && !a.resolved).length
+
+  function handleLogout() { logout(); router.push('/') }
 
   return (
     <div className="min-h-screen bg-[#09090b] flex flex-col">
-      {/* Top bar */}
+      {introOpen && (
+        <IntroModal
+          companyName={company.name}
+          machineCount={company.machines.length}
+          criticalCount={criticalCount}
+          onStartGuided={() => { setIntroOpen(false); setGuidedOpen(true) }}
+          onSkip={() => setIntroOpen(false)}
+        />
+      )}
+      {guidedOpen && !introOpen && (
+        <GuidedOverlay
+          onClose={() => setGuidedOpen(false)}
+          onSetSection={(tab) => setSection(TAB_MAP[tab])}
+        />
+      )}
       <header className="h-14 border-b border-[#1c1c1f] bg-[#09090b]/98 backdrop-blur-md flex items-center px-6 gap-4 sticky top-0 z-40">
         <Link href="/" className="flex items-center gap-2 flex-shrink-0">
-          <img
-            src="https://hebbkx1anhila5yf.public.blob.vercel-storage.com/api-attachments/G5GBg0NwHnI0ygSX2aOgv-yHCBfxf9exqvRH4s5vViaYhdSw2A6T.png"
-            alt="Mainteligence"
-            className="w-7 h-7 object-contain"
-          />
+          <img src="https://hebbkx1anhila5yf.public.blob.vercel-storage.com/api-attachments/G5GBg0NwHnI0ygSX2aOgv-yHCBfxf9exqvRH4s5vViaYhdSw2A6T.png"
+            alt="Mainteligence" className="w-7 h-7 object-contain" />
           <span className="font-semibold text-[13px] text-[#fafafa] whitespace-nowrap hidden sm:block">
             Maint<span className="text-[#e8650a]">elligence</span>
           </span>
         </Link>
-
         <div className="h-4 w-px bg-[#1c1c1f] hidden sm:block" />
-        <div className="flex items-center gap-1.5 hidden sm:flex">
+        <div className="flex items-center gap-1.5">
           <span className="w-1.5 h-1.5 rounded-full bg-[#10b981]" />
-          <span className="text-[10px] font-mono text-[#52525b]">Client Portal</span>
+          <span className="text-[10px] font-mono text-[#52525b]">Espace Client</span>
         </div>
-
         <div className="flex-1" />
-
         {criticalCount > 0 && (
           <div className="flex items-center gap-1.5 text-[10px] font-mono text-[#ef4444] bg-[#ef4444]/8 border border-[#ef4444]/20 px-2.5 py-1.5 rounded-sm">
             <AlertTriangle size={10} />
-            <span>{criticalCount} Critical</span>
+            <span>{criticalCount} Critique{criticalCount > 1 ? 's' : ''}</span>
           </div>
         )}
-
+        {!introOpen && !guidedOpen && (
+          <button onClick={() => setGuidedOpen(true)}
+            className="flex items-center gap-1.5 text-[10px] font-mono text-[#52525b] hover:text-[#e8650a] border border-[#1c1c1f] hover:border-[#e8650a]/30 px-2.5 py-1.5 rounded-sm transition-colors">
+            <Play size={9} /> Visite guidée
+          </button>
+        )}
         <div className="hidden md:flex items-center gap-1.5">
           <Building2 size={11} className="text-[#3a3a3d]" />
           <span className="text-[11px] font-mono text-[#52525b] max-w-[180px] truncate">{company.name}</span>
         </div>
-
-        <button
-          onClick={handleLogout}
-          className="flex items-center gap-1.5 text-[10px] font-mono text-[#3a3a3d] hover:text-[#ef4444] transition-colors px-2 py-1.5 rounded-sm border border-transparent hover:border-[#ef4444]/20"
-        >
+        <button onClick={handleLogout}
+          className="flex items-center gap-1.5 text-[10px] font-mono text-[#3a3a3d] hover:text-[#ef4444] transition-colors px-2 py-1.5 rounded-sm border border-transparent hover:border-[#ef4444]/20">
           <LogOut size={11} />
-          <span className="hidden sm:block">Logout</span>
+          <span className="hidden sm:block">Déconnexion</span>
         </button>
       </header>
-
-      {/* Body */}
-      <div className="flex flex-1 min-h-0">
-        {/* Sidebar */}
-        <aside className="w-52 flex-shrink-0 border-r border-[#1c1c1f] bg-[#09090b] flex flex-col hidden md:flex">
-          {/* Company badge */}
-          <div className="px-4 py-4 border-b border-[#1c1c1f]">
-            <p className="text-[9px] font-mono uppercase tracking-widest text-[#3a3a3d] mb-1">Workspace</p>
-            <p className="text-xs font-semibold text-[#e4e4e7] leading-tight">{company.name}</p>
-            <p className="text-[9px] font-mono mt-0.5" style={{ color: getPlanColor(company.plan) }}>
-              {getPlanLabel(company.plan)} Plan
-            </p>
-          </div>
-
-          {/* Nav */}
-          <nav className="flex-1 px-3 py-4 flex flex-col gap-0.5">
-            {NAV_ITEMS.map(item => {
-              const NI = item.IconComp
-              return (
-              <button
-                key={item.id}
-                onClick={() => setSection(item.id)}
-                className={cn(
-                  'w-full flex items-center gap-2.5 px-3 py-2.5 rounded-sm text-left transition-all text-xs',
-                  section === item.id
-                    ? 'bg-[#e8650a]/10 text-[#e8650a] border-l-2 border-[#e8650a]'
-                    : 'text-[#52525b] hover:text-[#71717a] hover:bg-[#111113]'
-                )}
-              >
-                <NI size={14} />
-                {item.label}
-                {item.id === 'overview' && criticalCount > 0 && (
-                  <span className="ml-auto text-[8px] font-mono bg-[#ef4444] text-white px-1.5 py-0.5 rounded-full">{criticalCount}</span>
-                )}
-              </button>
-            )})}
-
-          </nav>
-
-          {/* Bottom */}
-          <div className="px-4 py-3 border-t border-[#1c1c1f]">
-            <p className="text-[9px] font-mono text-[#3a3a3d] leading-relaxed">
-              Last sync<br />
-              <span className="text-[#27272a]">{formatLastSync(company.lastSync)}</span>
-            </p>
-          </div>
-        </aside>
-
-        {/* Mobile tab bar */}
-        <div className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-[#09090b] border-t border-[#1c1c1f] flex">
-          {NAV_ITEMS.map(item => {
-            const NI = item.IconComp
-            return (
-            <button
-              key={item.id}
-              onClick={() => setSection(item.id)}
-              className={cn(
-                'flex-1 flex flex-col items-center gap-1 py-2.5 text-[9px] font-mono transition-colors',
-                section === item.id ? 'text-[#e8650a]' : 'text-[#27272a]'
-              )}
-            >
-              <NI size={14} />
-              <span className="hidden sm:block">{item.label.split(' ')[0]}</span>
-            </button>
-            )
-          })}
-        </div>
-
-        {/* Main content */}
-        <main className="flex-1 overflow-auto pb-16 md:pb-0">
-          {/* Page header */}
-          <div className="px-6 py-5 border-b border-[#111113] flex items-center justify-between">
-            <div>
-              <div className="flex items-center gap-2 text-[9px] font-mono text-[#3a3a3d] mb-1">
-                <span>Client Portal</span>
-                <ChevronRight size={9} />
-                <span className="text-[#52525b]">{sectionLabel}</span>
-              </div>
-              <h1 className="text-sm font-semibold text-[#e4e4e7]">{sectionLabel}</h1>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <Radio size={9} className="text-[#10b981] animate-pulse" />
-              <span className="text-[9px] font-mono text-[#3a3a3d]">{company.machines.length} machines online</span>
-            </div>
-          </div>
-
-          <div className="px-6 py-5">
-            {section === 'overview' && (
-              <OverviewSection
-                machines={company.machines}
-                alerts={company.alerts}
-                avgHealth={company.avgHealthScore}
-                lastSync={company.lastSync}
-                planExpiry={company.planExpiry}
-                plan={company.plan}
-              />
-            )}
-            {section === 'machines' && <MachinesSection machines={company.machines} />}
-            {section === 'monitoring' && <MonitoringSection machines={company.machines} />}
-            {section === 'ai' && <AISection machines={company.machines} />}
-            {section === 'reports' && <ReportsSection alerts={company.alerts} reports={company.reports} />}
-            {section === 'account' && <AccountSection company={company} email={email} logout={handleLogout} />}
-          </div>
-        </main>
-      </div>
+      <MainteligenceDashboard
+        mode="client"
+        section={section}
+        setSection={setSection}
+        onResumeGuided={introOpen || guidedOpen ? undefined : () => setGuidedOpen(true)}
+      />
     </div>
   )
 }
