@@ -219,7 +219,7 @@ export default function PricingPage() {
                 </p>
               </div>
               <div className="shrink-0 text-center">
-                <p className="text-2xl font-bold text-[#fafafa]">385 000 DZD</p>
+                <p className="text-2xl font-bold text-[#fafafa]">65 000 DZD</p>
                 <p className="text-[10px] font-mono text-[#52525b]">per unit · one-time</p>
                 <p className="text-[10px] font-mono text-[#52525b] mt-0.5">+ installation service available</p>
                 <Link href="/contact" className="mt-3 inline-flex items-center gap-2 text-xs bg-[#111113] border border-[#27272a] hover:border-[#52525b] text-[#a1a1aa] hover:text-[#fafafa] px-4 py-2 rounded-sm transition-colors">
